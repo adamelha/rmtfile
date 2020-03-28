@@ -119,7 +119,7 @@ static void sbull_transfer(struct sbull_dev *dev, unsigned long sector,
 {
 	unsigned long offset = sector*KERNEL_SECTOR_SIZE;
 	unsigned long nbytes = nsect*KERNEL_SECTOR_SIZE;
-    printk("rmtfile: sbull_transfer -->\n");
+    printk("rmtfile: sbull_transfer sector=%ld nsect=%ld buffer=%p write=%d nbytes=%ld-->\n", sector, nsect, buffer, write, nbytes);
 	if ((offset + nbytes) > dev->size) {
 		printk (KERN_NOTICE "Beyond-end write (%ld %ld)\n", offset, nbytes);
 		return;
@@ -146,10 +146,26 @@ static void sbull_request(struct request_queue *q)
 	while ((req = blk_fetch_request(q)) != NULL) {
 		struct sbull_dev *dev = req->rq_disk->private_data;
         void *buffer = bio_data(req->bio);
-        printk("rmtfile: got buffer -->\n");
+        printk("rmtfile: got buffer %p-->\n", buffer);
+        if (!buffer) {
+            printk("rmtfile: before  blk_end_request_cur<--1\n");
+            // blk_end_request_cur(req, -1);
+            if (!__blk_end_request_cur(req, 0)) {
+                printk("rmtfile: __blk_end_request_cur is null\n");
+                break;
+            }
+            printk("rmtfile: after  blk_end_request_cur<--1\n");
+            continue;
+        }
 		if (req->cmd_type != REQ_TYPE_FS) {
+            printk("rmtfile: before  blk_end_request_cur<--2\n");
 			printk (KERN_NOTICE "Skip non-fs request\n");
-			blk_end_request_cur(req, -1);
+			//blk_end_request_cur(req, -1);
+            if (!__blk_end_request_cur(req, 0)) {
+                printk("rmtfile: __blk_end_request_cur is null\n");
+                break;
+            }
+            printk("rmtfile: after  blk_end_request_cur<--2\n");
 			continue;
 		}
     //    	printk (KERN_NOTICE "Req dev %d dir %ld sec %ld, nr %d f %lx\n",
@@ -159,7 +175,13 @@ static void sbull_request(struct request_queue *q)
         
 		sbull_transfer(dev, blk_rq_pos(req), blk_rq_cur_sectors(req),
 				buffer, rq_data_dir(req));
-		blk_end_request_cur(req, 0);
+        printk("rmtfile: before  blk_end_request_cur<--3\n");
+		// blk_end_request_cur(req, 0);
+        if (!__blk_end_request_cur(req, 0)) {
+            printk("rmtfile: __blk_end_request_cur is null\n");
+            break;
+        }
+        printk("rmtfile: after  blk_end_request_cur<--3\n");
 	}
     printk("rmtfile: sbull_request <--\n");
 }
@@ -252,8 +274,8 @@ static int sbull_open(struct block_device *i_bdev, fmode_t mode)
 	//del_timer_sync(&dev->timer);
 	// filp->private_data = dev;
 	spin_lock(&dev->lock);
-	if (! dev->users) 
-		check_disk_change(i_bdev);
+	// if (! dev->users) 
+	// 	check_disk_change(i_bdev);
 	dev->users++;
 	spin_unlock(&dev->lock);
     printk("rmtfile: sbull_open <--\n");
@@ -328,6 +350,7 @@ static int sbull_ioctl (struct block_device *bd, fmode_t mode,
 	struct hd_geometry geo;
 	struct sbull_dev *dev = bd->bd_disk->private_data;
 
+    printk ("rmtfile: sbull_ioctl -->\n");
 	switch(cmd) {
 	    case HDIO_GETGEO:
         	/*
@@ -336,16 +359,22 @@ static int sbull_ioctl (struct block_device *bd, fmode_t mode,
 		 * and calculate the corresponding number of cylinders.  We set the
 		 * start of data at sector four.
 		 */
+        printk ("rmtfile: sbull_ioctl HDIO_GETGEO-->\n");
 		size = dev->size*(hardsect_size/KERNEL_SECTOR_SIZE);
 		geo.cylinders = (size & ~0x3f) >> 6;
 		geo.heads = 4;
 		geo.sectors = 16;
 		geo.start = 4;
-		if (copy_to_user((void __user *) arg, &geo, sizeof(geo)))
+        printk ("rmtfile: before copy_to_user -->\n");
+		if (copy_to_user((void __user *) arg, &geo, sizeof(geo))) {
+            printk ("rmtfile: before copy_to_user failed-->\n");
 			return -EFAULT;
+        }
+        printk ("rmtfile: sbull_ioctl -->\n");
 		return 0;
 	}
 
+    printk ("rmtfile: sbull_ioctl bad command-->\n");
 	return -ENOTTY; /* unknown command */
 }
 
@@ -371,11 +400,13 @@ static void setup_device(struct sbull_dev *dev, int which)
 	/*
 	 * Get some memory.
 	 */
+    printk ("rmtfile: setup_device -->\n");
 	memset (dev, 0, sizeof (struct sbull_dev));
 	dev->size = nsectors*hardsect_size;
 	dev->data = vmalloc(dev->size);
+    printk ("rmtfile: after vmalloc\n");
 	if (dev->data == NULL) {
-		printk (KERN_NOTICE "vmalloc failure.\n");
+		printk (KERN_NOTICE "rmtfile: vmalloc failure.\n");
 		return;
 	}
 	spin_lock_init(&dev->lock);
@@ -386,9 +417,13 @@ static void setup_device(struct sbull_dev *dev, int which)
 	// init_timer(&dev->timer);
 	// dev->timer.data = (unsigned long) dev;
     // dev->timer.function = sbull_invalidate;
+    printk ("rmtfile: call blk_init_queue\n");
     dev->queue = blk_init_queue(sbull_request, &dev->lock);
+    printk ("after blk_init_queue\n");
     if (dev->queue == NULL)
         goto out_vfree;
+    
+    printk ("rmtfile: blk_init_queue successfull\n");
 	/*
 	 * The I/O queue, depending on whether we are using our own
 	 * make_request function or not.
@@ -422,22 +457,29 @@ static void setup_device(struct sbull_dev *dev, int which)
 	/*
 	 * And the gendisk structure.
 	 */
+    printk ("rmtfile: call alloc_disk\n");
 	dev->gd = alloc_disk(SBULL_MINORS);
 	if (! dev->gd) {
-		printk (KERN_NOTICE "alloc_disk failure\n");
+		printk (KERN_NOTICE "rmtfile: alloc_disk failure\n");
 		goto out_vfree;
 	}
+    printk ("rmtfile: alloc_disk successful\n");
 	dev->gd->major = sbull_major;
 	dev->gd->first_minor = which*SBULL_MINORS;
 	dev->gd->fops = &sbull_ops;
 	dev->gd->queue = dev->queue;
 	dev->gd->private_data = dev;
+    printk ("rmtfile: before snprintf\n");
 	snprintf (dev->gd->disk_name, 32, "rmtfile%c", which + 'a');
+    printk ("rmtfile: before set_capacity\n");
 	set_capacity(dev->gd, nsectors*(hardsect_size/KERNEL_SECTOR_SIZE));
+    printk ("rmtfile: after set_capacity\n");
 	add_disk(dev->gd);
+    printk ("rmtfile: after set_capacity\n");
 	return;
 
   out_vfree:
+    printk ("rmtfile: out_vfree\n");
 	if (dev->data)
 		vfree(dev->data);
 }
